@@ -1,7 +1,5 @@
 import userService from '../services/user.service.js';
 
-
-
 // ! POST /api/users/register
 // ? Registrar a un usuario (Con token de JWT implementado)
 
@@ -150,7 +148,7 @@ export const getAllFreelancers = async (req, res) => {
       });
 
       // C) Calcular Rating Promedio
-      let avgRating = 0;
+      let avgRating = 1;
       if (obj.opiniones && obj.opiniones.length > 0) {
         const sum = obj.opiniones.reduce((acc, op) => acc + (op.calificacion || op.puntuacion || 0), 0);
         avgRating = sum / obj.opiniones.length;
@@ -239,20 +237,40 @@ export const updateUser = async (req, res) => {
 export const becomeFreelancer = async (req, res) => {
   try {
     const userId = req.user._id;
-    const { linkedin, portfolio, descripcion, role } = req.body;
+    const { linkedin, portfolio, descripcion, role, estado, motivoRechazo } = req.body;
 
     if (!linkedin || !portfolio || !descripcion) {
       return res.status(400).json({ message: "Todos los campos son obligatorios para ser freelancer" });
     }
 
-    const updatedUser = await userService.convertirAFreelancer(userId, linkedin, portfolio, descripcion, role);
+    // Pasamos el estado también
+    const updatedUser = await userService.convertirAFreelancer(userId, linkedin, portfolio, descripcion, role, motivoRechazo, estado);
 
     res.status(200).json(updatedUser);
 
 
   } catch (error) {
-    console.error("Controller Error:", error);
     res.status(500).json({ message: "Error al convertir a freelancer", error: error.message });
+  }
+};
+
+// ! PUT /api/users/cancelar-solicitud/:id
+export const cancelFreelancerRequest = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const authenticatedUserId = req.user._id.toString();
+
+    // Verificación de seguridad: Coincidencia del ID
+    if (id !== authenticatedUserId) {
+      return res.status(403).json({ message: "No tienes permiso para cancelar esta solicitud." });
+    }
+
+    const updatedUser = await userService.cancelarSolicitudFreelancer(id);
+    console.log("Solicitud cancelada para usuario:", updatedUser._id);
+    res.status(200).json(updatedUser);
+  } catch (error) {
+    console.error("Error en cancelFreelancerRequest:", error);
+    res.status(500).json({ message: "Error al cancelar la solicitud", error: error.message });
   }
 };
 
@@ -345,10 +363,6 @@ export const actualizarSkillsUser = async (req, res) => {
     return res.status(200).json(updatedUser);
 
   } catch (error) {
-    // 🔴 Manejo de Errores: Esto captura cualquier fallo interno,
-    // incluyendo el error de validación del límite de 5 skills.
-    console.error('Error REAL al actualizar skills en el controlador:', error.message);
-
     // Manejo de error de validación de Mongoose (límite de 5 skills, etc.)
     if (error.name === 'ValidationError') {
       return res.status(400).json({ message: error.message });
@@ -407,7 +421,7 @@ export const getPremiumFreelancers = async (req, res) => {
       // Convertimos a objeto plano para poder agregar propiedades
       const freelancerObj = f.toObject();
 
-      let avgRating = 0;
+      let avgRating = 1;
       if (f.opiniones && f.opiniones.length > 0) {
         const sum = f.opiniones.reduce((acc, op) => acc + (op.calificacion || op.puntuacion || 0), 0);
         avgRating = sum / f.opiniones.length;
@@ -416,7 +430,7 @@ export const getPremiumFreelancers = async (req, res) => {
       // Agregamos el rating calculado al objeto
       freelancerObj.calculatedRating = avgRating;
       // También aseguramos que el campo 'rating' (si se usa en el front) tenga este valor
-      freelancerObj.rating = avgRating.toFixed(1);
+      freelancerObj.rating = avgRating;
 
       return freelancerObj;
     });
@@ -426,7 +440,6 @@ export const getPremiumFreelancers = async (req, res) => {
 
     res.status(200).json(freelancersWithRating);
   } catch (error) {
-    console.error("Error en getPremiumFreelancers:", error);
     res.status(500).json({ message: "Error al obtener freelancers premium", error: error.message });
   }
 };
@@ -436,12 +449,13 @@ export const getPremiumFreelancers = async (req, res) => {
 export const getFreelancersByMainCategory = async (req, res) => {
   try {
     const { category } = req.params;
+
     const freelancers = await userService.obtenerFreelancersPorCategoria(category);
 
     // Calcular rating para cada freelancer
     const freelancersWithRating = freelancers.map(f => {
       const obj = f.toObject();
-      let avgRating = 0;
+      let avgRating = 1;
       if (obj.opiniones && obj.opiniones.length > 0) {
         const sum = obj.opiniones.reduce((acc, op) => acc + (op.calificacion || op.puntuacion || 0), 0);
         avgRating = sum / obj.opiniones.length;
@@ -452,7 +466,6 @@ export const getFreelancersByMainCategory = async (req, res) => {
 
     res.status(200).json(freelancersWithRating);
   } catch (error) {
-    console.error("Error en getFreelancersByMainCategory:", error);
     res.status(500).json({ message: "Error al filtrar por categoría principal", error: error.message });
   }
 };
@@ -467,7 +480,7 @@ export const getFreelancersBySpecificCategory = async (req, res) => {
     // Calcular rating para cada freelancer
     const freelancersWithRating = freelancers.map(f => {
       const obj = f.toObject();
-      let avgRating = 0;
+      let avgRating = 1;
       if (obj.opiniones && obj.opiniones.length > 0) {
         const sum = obj.opiniones.reduce((acc, op) => acc + (op.calificacion || op.puntuacion || 0), 0);
         avgRating = sum / obj.opiniones.length;
@@ -478,7 +491,47 @@ export const getFreelancersBySpecificCategory = async (req, res) => {
 
     res.status(200).json(freelancersWithRating);
   } catch (error) {
-    console.error("Error en getFreelancersBySpecificCategory:", error);
     res.status(500).json({ message: "Error al filtrar por subcategoría", error: error.message });
+  }
+};
+
+export const deleteUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const deletedUser = await userService.eliminarUsuario(id);
+    res.status(200).json(deletedUser);
+  } catch (error) {
+    res.status(500).json({ message: "Error al eliminar el usuario", error: error.message });
+  }
+};
+
+export const rejectUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { motivo } = req.body;
+    const rejectedUser = await userService.rechazarUsuario(id, motivo);
+    res.status(200).json(rejectedUser);
+  } catch (error) {
+    res.status(500).json({ message: "Error al rechazar el usuario", error: error.message });
+  }
+};
+
+export const approveUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const approvedUser = await userService.aprobarUsuario(id);
+    res.status(200).json(approvedUser);
+  } catch (error) {
+    res.status(500).json({ message: "Error al aprobar el usuario", error: error.message });
+  }
+};
+
+export const reapplyUser = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const user = await userService.reaplicarUsuario(userId);
+    res.status(200).json(user);
+  } catch (error) {
+    res.status(500).json({ message: "Error al reenviar solicitud", error: error.message });
   }
 };

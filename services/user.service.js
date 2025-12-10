@@ -1,9 +1,9 @@
-// funciones que se usarán en user.controller.js para que el controlador no maneje lógica y quede todo bien modularizado y bien distribuidas las responsabilidades
-
 import User from "../models/user.model.js";
 import jwt from 'jsonwebtoken'
 import bcrypt from 'bcrypt'
 import mongoose from "mongoose";
+
+
 
 //Función para obtener todos los usuarios que hay en la base de datos
 const obtenerTodosLosUsuarios = async () => {
@@ -36,10 +36,16 @@ const guardarUsuario = async (nombre, apellido, email, password, role, saltRound
 
     const hashedPassword = await hashearPassword(password, saltRounds)
 
+    // Si se intenta registrar como freelancer, forzamos el rol 'pendiente'
+    let userRole = role || 'cliente';
+    if (userRole === 'freelancer') {
+        userRole = 'pendiente';
+    }
+
     const newUser = new User({
         nombre, apellido, email,
         password: hashedPassword,
-        role: role || 'cliente'
+        role: userRole,
     })
 
     const usuarioGuardado = await newUser.save()
@@ -97,9 +103,7 @@ const obtenerFreelancers = async (filter = {}) => {
 // Función para obtener freelancers premium
 const obtenerFreelancersPremium = async () => {
     const freelancers = await User.find({
-        plan: 'premium',
-        isDisponible: true,
-        role: 'freelancer'
+        role: 'premium' // Buscamos por ROL premium ahora
     }).populate('opiniones');
     return freelancers;
 };
@@ -112,28 +116,30 @@ const buscarUsuarioSinPassword = async (decoded) => {
 // --- NUEVAS FUNCIONES DE ESTADO ---
 
 // 1. Convertir a Freelancer (con campos nuevos)
-const convertirAFreelancer = async (userId, linkedin, portfolio, descripcion, role) => {
+// 1. Convertir a Freelancer (con campos nuevos)
+const convertirAFreelancer = async (userId, linkedin, portfolio, descripcion, role, motivo, estado) => {
+    // Usamos findByIdAndUpdate para una actualización atómica y segura
+    const updatedUser = await User.findByIdAndUpdate(
+        userId,
+        {
+            $set: {
+                linkedin: linkedin,
+                portfolio: portfolio,
+                descripcion: descripcion,
+                role: role,
+                estado: estado,
+                motivoRechazo: motivo
+            }
+        },
+        { new: true, runValidators: true }
+    ).select('-password');
 
-    // Usamos findById y save() en lugar de findByIdAndUpdate para asegurar que se guarden los cambios
-    const user = await User.findById(userId);
 
-    if (!user) {
+    if (!updatedUser) {
         throw new Error('Usuario no encontrado al intentar convertir a freelancer');
     }
 
-    // Actualizamos los campos manualmente
-    user.role = role || 'freelancer';
-    user.linkedin = linkedin;
-    user.portfolio = portfolio;
-    user.descripcion = descripcion;
-
-    // Guardamos el usuario actualizado
-    const userSaved = await user.save();
-
-    const userJson = userSaved.toJSON();
-    delete userJson.password;
-
-    return userJson;
+    return updatedUser.toJSON();
 };
 
 // 2. Cambiar Disponibilidad (Disponible / Ocupado)
@@ -151,6 +157,29 @@ const cambiarDisponibilidad = async (userId, estado) => {
     return userUpdate.toJSON();
 };
 
+const cancelarSolicitudFreelancer = async (userId) => {
+    // 1. Buscamos el usuario (instancia de Mongoose)
+    const user = await User.findById(userId);
+    console.log(user);
+    if (!user) {
+        throw new Error('Usuario no encontrado');
+    }
+
+    // 2. Modificamos las propiedades directamente
+    user.role = 'cliente';
+    user.linkedin = "";
+    user.portfolio = "";
+    user.descripcion = "";
+
+    // 3. Guardamos los cambios. Esto dispara validaciones y middleware de Mongoose.
+    const updatedUser = await user.save();
+
+    // 4. Retornamos el objeto limpio
+    const userJson = updatedUser.toJSON();
+    delete userJson.password;
+    return userJson;
+};
+
 // 3. Convertir a Premium
 const convertirAPremium = async (userId, plan) => {
     // Usamos findById y save()
@@ -162,10 +191,8 @@ const convertirAPremium = async (userId, plan) => {
 
     user.plan = plan;
 
-    // Aseguramos que sea freelancer al hacerse premium
-    if (user.role !== 'freelancer') {
-        user.role = 'freelancer';
-    }
+    // Si se convierte a premium, actualizamos el ROL a 'premium'
+    user.role = 'premium'; // NUEVO REQUERIMIENTO: Premium es un rol
 
     const userSaved = await user.save();
 
@@ -175,22 +202,7 @@ const convertirAPremium = async (userId, plan) => {
     return userJson;
 };
 
-const actualizarSkills = async (userId, newSkills) => {
-    const updatedUser = await User.findByIdAndUpdate(
-        userId,
-        { $set: { skills: newSkills } }, // Usamos $set (si ya lo tenías)
-        { new: true, runValidators: true }
-    ).select('-password');
 
-    // Si no se encontró el usuario, lanzamos un error claro.
-    if (!updatedUser) {
-        throw new Error('Usuario no encontrado para la actualización de skills.');
-    }
-
-    // 🟢 CORRECCIÓN CLAVE: Usamos .toJSON() para serializar el objeto de Mongoose.
-    // Esto previene errores si hay propiedades virtuales o tipos complejos.
-    return updatedUser.toJSON();
-};
 
 // --- FUNCIONES DE ESTADÍSTICAS ---
 
@@ -327,6 +339,55 @@ const actualizarSkillsUser = async (userId, newSkills) => {
     return updatedUser.toJSON();
 };
 
+//Eliminar usuario
+const eliminarUsuario = async (userId) => {
+    const deletedUser = await User.findByIdAndDelete(userId);
+    return deletedUser;
+};
+
+// Rechazar usuario (Actualizar estado a rechazado)
+const rechazarUsuario = async (userId, motivo) => {
+
+    const user = await User.findByIdAndUpdate(
+        userId,
+        { $set: { estado: 'rechazado', role: 'cliente', motivoRechazo: motivo } },
+        { new: true }
+    );
+
+    return user;
+};
+
+// Aprobar usuario (Convertir a Freelancer)
+const aprobarUsuario = async (userId) => {
+    const user = await User.findById(userId);
+    if (!user) throw new Error('Usuario no encontrado');
+
+    user.estado = 'aprobado';
+    // Si era pendiente, pasa a freelancer (o premium si ya tenía plan, pero asumimos freelancer base)
+    if (user.role === 'pendiente') {
+        user.role = 'freelancer';
+    }
+
+    await user.save();
+    return user;
+};
+
+// Reaplicar usuario (Volver a pendiente)
+const reaplicarUsuario = async (userId) => {
+    const user = await User.findByIdAndUpdate(
+        userId,
+        {
+            $set: {
+                estado: 'pendiente',
+                role: 'pendiente',
+                motivoRechazo: null // Limpiamos el motivo anterior
+            }
+        },
+        { new: true }
+    );
+    return user;
+};
+
 export default {
     obtenerTodosLosUsuarios,
     usuarioExiste,
@@ -341,10 +402,15 @@ export default {
     convertirAFreelancer,
     cambiarDisponibilidad,
     convertirAPremium,
-    actualizarSkills,
+    actualizarSkillsUser,
     incrementarVisitas,
     incrementarLinkedin,
     incrementarPortfolio,
     obtenerFreelancersPorCategoria,
-    obtenerFreelancersPorSubCategoria
+    obtenerFreelancersPorSubCategoria,
+    eliminarUsuario,
+    cancelarSolicitudFreelancer,
+    rechazarUsuario,
+    aprobarUsuario,
+    reaplicarUsuario
 }
